@@ -29,7 +29,8 @@ Windows under the dock and above the dock (setting "Windows do not go under the 
 - Running-window indicators; click to focus, minimize or cycle between windows
 - Right-click menu: open, new window, app actions, close all windows, pin/unpin
 - Colors: dock, border and indicator color pickers plus ready-made themes
-- Auto-hide: the dock slides away and appears when the mouse reaches the bottom edge
+- Dock position: bottom, left, right or top edge of the screen
+- Auto-hide: the dock slides away and appears when the mouse reaches the screen edge
 - Settings window: icon size, zoom, spacing, padding, corner radius, opacity, margins
 - Built-in installer: start at login, applications-menu entry, auto-restart if it crashes
 

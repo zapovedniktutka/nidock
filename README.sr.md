@@ -29,7 +29,8 @@ Prozori ispod doka i iznad doka (podešavanje "Prozori ne idu ispod doka"):
 - Indikatori pokrenutih prozora; klik fokusira, minimizuje ili prebacuje između prozora
 - Meni na desni klik: otvori, novi prozor, akcije aplikacije, zatvori sve prozore, zakači/ukloni
 - Boje: izbor boje doka, ivice i indikatora i gotove teme
-- Automatsko sakrivanje: dok klizi ispod ekrana i izlazi kad miš dođe do donje ivice
+- Pozicija doka: donja, leva, desna ili gornja ivica ekrana
+- Automatsko sakrivanje: dok klizi van ekrana i izlazi kad miš dođe do ivice
 - Prozor podešavanja: veličina ikonica, zum, razmaci, margina, zaobljenost, providnost
 - Ugrađen instaler: pokretanje pri prijavi, unos u meni aplikacija, automatski restart ako pukne
 

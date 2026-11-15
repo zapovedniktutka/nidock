@@ -71,6 +71,7 @@ DEFAULTS = {
     "window_gap": 8,          # razmak između prozora i doka
     "reserve_space": True,    # da prozori ne idu ispod doka
     "autohide": False,        # dok se sakrije i izađe kad miš ode do donje ivice
+    "position": "bottom",     # ivica ekrana: bottom, left, right, top
     "show_running": True,      # prikaži i pokrenute aplikacije koje nisu zakačene
     "pinned": None,           # lista .desktop fajlova (None = automatski)
 }
@@ -256,6 +257,8 @@ def load_config():
             cfg.update(json.load(f))
     except (OSError, ValueError):
         pass
+    if cfg.get("position") not in ("bottom", "left", "right", "top"):
+        cfg["position"] = "bottom"
     if not cfg.get("pinned"):
         pinned = []
         for group in CANDIDATES:
@@ -418,7 +421,9 @@ class Dock(Gtk.Window):
         self.base_w = 0
         self.panel_h = self.S + 2 * self.pad
         self.headroom = 0
-        self.real_h = 100
+        self.real_h = 100       # virtual height (dock always "at the bottom")
+        self.rw = 400           # real window size (swapped for left/right)
+        self.rh = 100
         self.reveal = 0.0 if cfg.get("autohide") else 1.0   # 1 = vidljiv, 0 = sakriven
         self.reveal_target = self.reveal
         self._hide_id = 0
@@ -614,26 +619,74 @@ class Dock(Gtk.Window):
         self.headroom = int(S * (Z - 1)) + TIP_H + int(S * 0.5)
         self.win_h = self.headroom + self.panel_h
         wa = self.monitor_area()
+        pos = self.position()
+        side = pos in ("left", "right")
         extra = int((Z - 1) * S * 2.8) + 60
-        self.win_w = min(wa.width, int(self.base_w + 2 * self.pad + extra))
-        self.win_x = wa.x + (wa.width - self.win_w) // 2
+        if side:
+            self.headroom += 200   # room for the tooltip next to the icon
+            self.win_h = self.headroom + self.panel_h
+        self.win_w = min(wa.height if side else wa.width,
+                         int(self.base_w + 2 * self.pad + extra))
         mb = int(self.cfg["margin_bottom"])
         if self.autohide_on():
-            # prozor leži tačno na donjoj ivici ekrana (da se miš lako "uhvati"),
-            # a razmak od ivice dobija kao dodatnu providnu visinu
+            # the window sits exactly on the screen edge (so the mouse can hit it easily),
+            # and the gap from the edge becomes extra transparent size
             self.real_h = self.win_h + mb
-            self.win_y = wa.y + wa.height - self.real_h
+            off = 0
         else:
             self.real_h = self.win_h
-            self.win_y = wa.y + wa.height - self.win_h - mb
+            off = mb
+        if side:
+            self.rw, self.rh = self.real_h, self.win_w
+            self.win_y = wa.y + (wa.height - self.win_w) // 2
+            self.win_x = wa.x + off if pos == "left" else wa.x + wa.width - self.rw - off
+        else:
+            self.rw, self.rh = self.win_w, self.real_h
+            self.win_x = wa.x + (wa.width - self.win_w) // 2
+            self.win_y = wa.y + off if pos == "top" else wa.y + wa.height - self.rh - off
 
-        self.area.set_size_request(self.win_w, self.real_h)
-        self.resize(self.win_w, self.real_h)
+        self.area.set_size_request(self.rw, self.rh)
+        self.resize(self.rw, self.rh)
         self.move(self.win_x, self.win_y)
         if self.get_window() is not None:
             self.set_input_region(self.hover)
             if struts:
                 self.set_struts()
+
+    def position(self):
+        p = self.cfg.get("position", "bottom")
+        return p if p in ("bottom", "left", "right", "top") else "bottom"
+
+    def pos_matrix(self):
+        """Virtual space (dock at the bottom, +y toward the edge) -> real window."""
+        p, vh = self.position(), self.real_h
+        if p == "top":
+            return cairo.Matrix(1, 0, 0, -1, 0, vh)
+        if p == "left":
+            return cairo.Matrix(0, 1, -1, 0, vh, 0)
+        if p == "right":
+            return cairo.Matrix(0, 1, 1, 0, 0, 0)
+        return cairo.Matrix()
+
+    def to_virtual(self, x, y):
+        p, vh = self.position(), self.real_h
+        if p == "top":
+            return x, vh - y
+        if p == "left":
+            return y, vh - x
+        if p == "right":
+            return y, x
+        return x, y
+
+    def vx(self, ev):
+        return self.to_virtual(ev.x, ev.y)[0]
+
+    def real_rect(self, x, y, w, h):
+        m = self.pos_matrix()
+        x1, y1 = m.transform_point(x, y)
+        x2, y2 = m.transform_point(x + w, y + h)
+        return cairo.RectangleInt(int(min(x1, x2)), int(min(y1, y2)),
+                                  int(abs(x2 - x1)), int(abs(y2 - y1)))
 
     def autohide_on(self):
         return bool(self.cfg.get("autohide"))
@@ -676,7 +729,7 @@ class Dock(Gtk.Window):
         top = max(0, top)
         if self.autohide_on() and self.reveal_target == 0.0 and self.reveal < 0.02:
             top = max(0, self.real_h - 3)   # sakriven: samo tanka traka uz ivicu
-        rect = cairo.RectangleInt(x, top, w, self.real_h - top)
+        rect = self.real_rect(x, top, w, self.real_h - top)
         gw.input_shape_combine_region(cairo.Region(rect), 0, 0)
 
     def set_struts(self):
@@ -693,20 +746,33 @@ class Dock(Gtk.Window):
                     pass
             return
         display = Gdk.Display.get_default()
-        root_h = 0
+        root_w = root_h = 0
         for i in range(display.get_n_monitors()):
             g = display.get_monitor(i).get_geometry()
+            root_w = max(root_w, g.x + g.width)
             root_h = max(root_h, g.y + g.height)
-        panel_top = self.win_y + self.win_h - self.panel_h
-        strut = max(0, root_h - panel_top) + int(self.cfg["window_gap"])
-        x0 = self.win_x
-        x1 = self.win_x + self.win_w - 1
+        pos = self.position()
+        gap = int(self.cfg["window_gap"])
+        inner = self.win_h - self.panel_h   # transparent part between the panel and the zoom
+        x0, x1 = self.win_x, self.win_x + self.rw - 1
+        y0, y1 = self.win_y, self.win_y + self.rh - 1
+        if pos == "bottom":
+            strut = max(0, root_h - (self.win_y + inner)) + gap
+            vals = [0, 0, 0, strut, 0, 0, 0, 0, 0, 0, x0, x1]
+        elif pos == "top":
+            strut = self.win_y + self.panel_h + gap
+            vals = [0, 0, strut, 0, 0, 0, 0, 0, x0, x1, 0, 0]
+        elif pos == "left":
+            strut = self.win_x + self.panel_h + gap
+            vals = [strut, 0, 0, 0, y0, y1, 0, 0, 0, 0, 0, 0]
+        else:
+            strut = max(0, root_w - (self.win_x + inner)) + gap
+            vals = [0, strut, 0, 0, 0, 0, y0, y1, 0, 0, 0, 0]
         try:
             subprocess.Popen(["xprop", "-id", str(xid), "-f", "_NET_WM_STRUT_PARTIAL", "32c",
-                              "-set", "_NET_WM_STRUT_PARTIAL",
-                              "0,0,0,%d,0,0,0,0,0,0,%d,%d" % (strut, x0, x1)])
+                              "-set", "_NET_WM_STRUT_PARTIAL", ",".join(map(str, vals))])
             subprocess.Popen(["xprop", "-id", str(xid), "-f", "_NET_WM_STRUT", "32c",
-                              "-set", "_NET_WM_STRUT", "0,0,0,%d" % strut])
+                              "-set", "_NET_WM_STRUT", ",".join(map(str, vals[:4]))])
         except OSError:
             pass  # xprop nije instaliran (paket x11-utils)
 
@@ -801,8 +867,10 @@ class Dock(Gtk.Window):
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
+        m0 = cr.get_matrix()            # real window coordinates (for upright icons and text)
+        cr.transform(self.pos_matrix())  # from here on: the dock is drawn "at the bottom"
         if self.reveal < 0.999:
-            # sakrivanje: ceo dok klizi ispod donje ivice prozora
+            # hiding: the whole dock slides toward the screen edge
             cr.translate(0, (1.0 - self.reveal) *
                          (self.panel_h + int(self.cfg["margin_bottom"]) + 8))
 
@@ -867,8 +935,10 @@ class Dock(Gtk.Window):
             pb = it.icon(math.ceil(S * self.Z) if it.scale > 1.02 else S)
             if pb is not None:
                 k = s / float(pb.get_width())
+                rx, ry = cr.user_to_device(x + s / 2.0, y + s / 2.0)
                 cr.save()
-                cr.translate(x, y)
+                cr.set_matrix(m0)
+                cr.translate(rx - s / 2.0, ry - s / 2.0)
                 cr.scale(k, k)
                 Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
                 cr.paint()
@@ -895,14 +965,24 @@ class Dock(Gtk.Window):
                 label = it.name
                 if len(it.windows) > 1:
                     label += " (%d)" % len(it.windows)
+                cx = it.x + it.w / 2.0
+                ax, ay = cr.user_to_device(cx, baseline - it.size - 10)
+                cr.set_matrix(m0)   # the tooltip is drawn upright in window coordinates
                 cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
                 cr.set_font_size(13)
                 te = cr.text_extents(label)
                 bw, bh = te.width + 22, 26
-                cx = it.x + it.w / 2.0
-                bx = min(max(4, cx - bw / 2.0), self.win_w - bw - 4)
-                top = baseline - it.size - 10 - bh
-                by = max(2, top)
+                pos = self.position()
+                if pos == "left":
+                    bx, by = ax, ay - bh / 2.0
+                elif pos == "right":
+                    bx, by = ax - bw, ay - bh / 2.0
+                elif pos == "top":
+                    bx, by = ax - bw / 2.0, ay
+                else:
+                    bx, by = ax - bw / 2.0, ay - bh
+                bx = min(max(4, bx), self.rw - bw - 4)
+                by = min(max(2, by), self.rh - bh - 2)
                 rrect(cr, bx, by, bw, bh, 9)
                 cr.set_source_rgba(0.07, 0.08, 0.12, 0.9)
                 cr.fill_preserve()
@@ -919,7 +999,7 @@ class Dock(Gtk.Window):
 
     def on_enter(self, w, ev):
         self.hover = True
-        self.mx, self.my = ev.x, ev.y
+        self.mx, self.my = self.to_virtual(ev.x, ev.y)
         self._reveal_now()
         self.set_input_region(True)
         self.update_targets()
@@ -939,14 +1019,14 @@ class Dock(Gtk.Window):
         return False
 
     def on_motion(self, w, ev):
-        self.mx, self.my = ev.x, ev.y
+        self.mx, self.my = self.to_virtual(ev.x, ev.y)
         self.hover = True
         self._reveal_now()
         if (self.press_item is not None and self.press_item.pinned and
-                self.press_btn == 1 and not self.dragging and abs(ev.x - self.press_x) > 6):
+                self.press_btn == 1 and not self.dragging and abs(self.mx - self.press_x) > 6):
             self.dragging = True
         if self.dragging:
-            self.reorder(ev.x)
+            self.reorder(self.mx)
         self.update_targets()
         self.kick()
         self.area.queue_draw()
@@ -967,11 +1047,11 @@ class Dock(Gtk.Window):
 
     def on_press(self, w, ev):
         if ev.button == 3:
-            self.show_menu(self.item_at(ev.x), ev)
+            self.show_menu(self.item_at(self.vx(ev)), ev)
             return True
         if ev.button in (1, 2):
-            self.press_item = self.item_at(ev.x)
-            self.press_x = ev.x
+            self.press_item = self.item_at(self.vx(ev))
+            self.press_x = self.vx(ev)
             self.press_btn = ev.button
             self.dragging = False
         return True
@@ -986,7 +1066,7 @@ class Dock(Gtk.Window):
             self.update_targets()
             self.kick()
             return True
-        if it is not None and not it.is_sep and it is self.item_at(ev.x):
+        if it is not None and not it.is_sep and it is self.item_at(self.vx(ev)):
             if ev.button == 1:
                 self.activate_item(it)
             elif ev.button == 2:
@@ -1204,7 +1284,7 @@ SETTINGS_ROWS = [
     ("padding", "Unutrašnja margina panela", 2, 24, 1, 0),
     ("radius", "Zaobljenost uglova", 0, 32, 1, 0),
     ("opacity", "Providnost pozadine", 0.0, 1.0, 0.05, 2),
-    ("margin_bottom", "Razmak doka od donje ivice", 0, 80, 1, 0),
+    ("margin_bottom", "Razmak doka od ivice ekrana", 0, 80, 1, 0),
     ("window_gap", "Razmak prozora od doka", 0, 80, 1, 0),
 ]
 
@@ -1215,10 +1295,12 @@ SETTINGS_COLORS = [
 ]
 
 SETTINGS_SWITCHES = [
-    ("autohide", "Automatsko sakrivanje (miš do donje ivice ga prikaže)"),
+    ("autohide", "Automatsko sakrivanje (miš do ivice ekrana ga prikaže)"),
     ("reserve_space", "Prozori ne idu ispod doka"),
     ("show_running", "Prikaži i nezakačene pokrenute aplikacije"),
 ]
+
+POSITIONS = [('bottom', 'Dole'), ('left', 'Levo'), ('right', 'Desno'), ('top', 'Gore')]
 
 
 class SettingsWindow(Gtk.Window):
@@ -1250,6 +1332,18 @@ class SettingsWindow(Gtk.Window):
             grid.attach(scale, 1, row, 1, 1)
             self.widgets[key] = scale
             row += 1
+
+        lab = Gtk.Label(label='Pozicija doka')
+        lab.set_halign(Gtk.Align.START)
+        pos_combo = Gtk.ComboBoxText()
+        for pid, pname in POSITIONS:
+            pos_combo.append(pid, pname)
+        pos_combo.set_active_id(dock.position())
+        pos_combo.connect("changed", self.on_position)
+        grid.attach(lab, 0, row, 1, 1)
+        grid.attach(pos_combo, 1, row, 1, 1)
+        self.widgets["position"] = pos_combo
+        row += 1
 
         for key, label in SETTINGS_SWITCHES:
             lab = Gtk.Label(label=label)
@@ -1344,6 +1438,13 @@ class SettingsWindow(Gtk.Window):
         self.dock.cfg[key] = int(round(v)) if digits == 0 else round(v, 2)
         self.dock.apply_settings()
 
+    def on_position(self, combo):
+        pid = combo.get_active_id()
+        if self._loading or not pid or pid == self.dock.cfg.get("position"):
+            return
+        self.dock.cfg["position"] = pid
+        self.dock.apply_settings()
+
     def on_switch(self, sw, _param, key):
         if self._loading:
             return
@@ -1357,6 +1458,8 @@ class SettingsWindow(Gtk.Window):
         for key, _l, *_rest in SETTINGS_ROWS:
             self.dock.cfg[key] = DEFAULTS[key]
             self.widgets[key].set_value(float(DEFAULTS[key]))
+        self.dock.cfg["position"] = DEFAULTS["position"]
+        self.widgets["position"].set_active_id(DEFAULTS["position"])
         for key, _l in SETTINGS_SWITCHES:
             self.dock.cfg[key] = DEFAULTS[key]
             self.widgets[key].set_active(bool(DEFAULTS[key]))
