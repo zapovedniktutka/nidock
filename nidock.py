@@ -71,6 +71,8 @@ DEFAULTS = {
     "window_gap": 8,          # gap between windows and the dock
     "reserve_space": True,    # keep windows from going under the dock
     "autohide": False,        # hide the dock; it slides in when the mouse reaches the bottom edge
+    "preview": True,          # window preview when hovering an app with open windows
+    "preview_thumbnails": True,  # show window thumbnails in the preview
     "position": "bottom",     # dock edge: bottom, left, right, top
     "show_running": True,      # also show running apps that are not pinned
     "pinned": None,           # list of .desktop files (None = automatic)
@@ -245,6 +247,8 @@ def supervise():
 def desktop_app(desktop_id):
     """Returns Gio.DesktopAppInfo or None (PyGObject raises TypeError for a missing file)."""
     try:
+        if desktop_id.startswith("/"):   # .desktop file pinned by its path
+            return Gio.DesktopAppInfo.new_from_filename(desktop_id)
         return Gio.DesktopAppInfo.new(desktop_id)
     except (TypeError, GLib.Error):
         return None
@@ -334,6 +338,59 @@ def rrect(cr, x, y, w, h, r):
 def now_ts():
     t = Gtk.get_current_event_time()
     return t if t else int(time.time())
+
+
+# ------------------------------------------------------------ window screenshot
+
+def _trap_push():
+    try:
+        Gdk.error_trap_push()
+        return True
+    except Exception:
+        return False
+
+
+def _trap_pop(pushed):
+    if pushed:
+        try:
+            Gdk.flush()
+            Gdk.error_trap_pop()
+        except Exception:
+            pass
+
+
+def capture_window(wnck_win, max_w, max_h):
+    """Best-effort screenshot of a window (X11, needs a compositor) scaled to fit
+    max_w x max_h. Returns a GdkPixbuf or None (minimized, other workspace, no access)."""
+    try:
+        if wnck_win.is_minimized():
+            return None
+        ws = wnck_win.get_screen().get_active_workspace()
+        if ws is not None and not wnck_win.is_on_workspace(ws):
+            return None
+        xid = wnck_win.get_xid()
+    except Exception:
+        return None
+    pushed = _trap_push()
+    pb = None
+    try:
+        gw = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), xid)
+        if gw is not None:
+            w, h = gw.get_width(), gw.get_height()
+            if w > 8 and h > 8:
+                pb = Gdk.pixbuf_get_from_window(gw, 0, 0, w, h)
+    except Exception:
+        pb = None
+    finally:
+        _trap_pop(pushed)
+    if pb is None:
+        return None
+    k = min(max_w / float(pb.get_width()), max_h / float(pb.get_height()), 1.0)
+    nw, nh = max(1, int(pb.get_width() * k)), max(1, int(pb.get_height() * k))
+    try:
+        return pb.scale_simple(nw, nh, GdkPixbuf.InterpType.BILINEAR)
+    except Exception:
+        return None
 
 
 # ----------------------------------------------------------------------- Item
@@ -427,6 +484,12 @@ class Dock(Gtk.Window):
         self.reveal = 0.0 if cfg.get("autohide") else 1.0   # 1 = visible, 0 = hidden
         self.reveal_target = self.reveal
         self._hide_id = 0
+        self.drop_item = None
+        self.preview = None
+        self.prev_target = None
+        self._prev_id = 0
+        self._prev_tick = 0
+        self._prev_out = 0
 
         self.set_title("NiDock")
         self.set_decorated(False)
@@ -458,6 +521,12 @@ class Dock(Gtk.Window):
         self.area.connect("leave-notify-event", self.on_leave)
         self.area.connect("button-press-event", self.on_press)
         self.area.connect("button-release-event", self.on_release)
+        self.area.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP,
+                                [Gtk.TargetEntry.new("text/uri-list", 0, 0)],
+                                Gdk.DragAction.COPY)
+        self.area.connect("drag-motion", self.on_drag_motion)
+        self.area.connect("drag-leave", self.on_drag_leave)
+        self.area.connect("drag-data-received", self.on_drag_data)
         self.add(self.area)
 
         # index of installed apps (used to match windows)
@@ -522,6 +591,8 @@ class Dock(Gtk.Window):
         return res
 
     def on_windows_changed(self, *args):
+        if self.preview_visible():
+            self.preview_hide()
         if not self._refresh_id:
             self._refresh_id = GLib.timeout_add(80, self._do_refresh)
 
@@ -709,7 +780,8 @@ class Dock(Gtk.Window):
     def _do_hide(self):
         self._hide_id = 0
         if (not self.autohide_on() or self.hover or self.menu_open or
-                self.dragging or self.settings_win is not None):
+                self.dragging or self.settings_win is not None or
+                self.preview_visible()):
             return False
         self.reveal_target = 0.0
         self.kick()
@@ -932,6 +1004,13 @@ class Dock(Gtk.Window):
             if self.dragging and it is self.press_item and self.mx is not None:
                 x = self.mx - s / 2.0
                 y -= 6
+            if it is self.drop_item:
+                rrect(cr, x - 5, y - 5, s + 10, s + 10, 10)
+                cr.set_source_rgba(ind[0], ind[1], ind[2], 0.25)
+                cr.fill_preserve()
+                cr.set_source_rgba(ind[0], ind[1], ind[2], 0.7)
+                cr.set_line_width(1.5)
+                cr.stroke()
             pb = it.icon(math.ceil(S * self.Z) if it.scale > 1.02 else S)
             if pb is not None:
                 k = s / float(pb.get_width())
@@ -959,7 +1038,8 @@ class Dock(Gtk.Window):
                     cr.fill()
 
         # tooltip
-        if self.hover and not self.dragging and not self.menu_open:
+        if (self.hover and not self.dragging and not self.menu_open and
+                not self.preview_visible()):
             it = self.item_at(self.mx)
             if it is not None and not it.is_sep:
                 label = it.name
@@ -1012,6 +1092,10 @@ class Dock(Gtk.Window):
         self.hover = False
         self.mx = None
         self.set_input_region(False)
+        if self._prev_id and not self.preview_visible():
+            GLib.source_remove(self._prev_id)
+            self._prev_id = 0
+            self.prev_target = None
         self.update_targets()
         self.kick()
         self.area.queue_draw()
@@ -1022,6 +1106,7 @@ class Dock(Gtk.Window):
         self.mx, self.my = self.to_virtual(ev.x, ev.y)
         self.hover = True
         self._reveal_now()
+        self.preview_hover()
         if (self.press_item is not None and self.press_item.pinned and
                 self.press_btn == 1 and not self.dragging and abs(self.mx - self.press_x) > 6):
             self.dragging = True
@@ -1046,6 +1131,7 @@ class Dock(Gtk.Window):
             self.cfg["pinned"] = [it.key for it in pinned]
 
     def on_press(self, w, ev):
+        self.preview_hide()
         if ev.button == 3:
             self.show_menu(self.item_at(self.vx(ev)), ev)
             return True
@@ -1072,6 +1158,189 @@ class Dock(Gtk.Window):
             elif ev.button == 2:
                 self.launch(it)
         return True
+
+    # ------------------------------------------------------- drag and drop of files
+
+    def on_drag_motion(self, w, ctx, x, y, t):
+        self.mx, self.my = self.to_virtual(x, y)
+        self.hover = True
+        self._reveal_now()
+        self.set_input_region(True)
+        it = self.item_at(self.mx)
+        self.drop_item = it if (it is not None and not it.is_sep) else None
+        self.update_targets()
+        self.kick()
+        self.area.queue_draw()
+        return False
+
+    def on_drag_leave(self, w, ctx, t):
+        self.drop_item = None
+        self.hover = False
+        self.mx = None
+        self.set_input_region(False)
+        self.update_targets()
+        self.kick()
+        self.area.queue_draw()
+        self.schedule_hide()
+
+    def on_drag_data(self, w, ctx, x, y, data, info, t):
+        self.drop_item = None
+        uris = [u for u in (data.get_uris() or []) if u]
+        if not uris:
+            return
+        vx = self.to_virtual(x, y)[0]
+        it = self.item_at(vx)
+        if all(u.endswith(".desktop") for u in uris):
+            self.pin_desktop_files(uris, it, vx)
+        elif it is not None and not it.is_sep and it.app is not None:
+            self.open_with(it, uris)
+        self.area.queue_draw()
+
+    def open_with(self, it, uris):
+        try:
+            ctx = Gdk.Display.get_default().get_app_launch_context()
+            ctx.set_timestamp(now_ts())
+            it.app.launch_uris(uris, ctx)
+        except Exception as e:
+            print("Cannot open files with %s: %s" % (it.name, e), file=sys.stderr)
+            return
+        if not it.windows:
+            it.bounce_t0 = time.monotonic()
+            self.kick()
+
+    def pin_desktop_files(self, uris, target=None, vx=0.0):
+        pinned = list(self.cfg["pinned"])
+        idx = len(pinned)
+        if target is not None and target.key in pinned:
+            idx = pinned.index(target.key) + (0 if vx < target.x + target.w / 2.0 else 1)
+        changed = False
+        for u in uris:
+            path = Gio.File.new_for_uri(u).get_path()
+            app = None
+            if path:
+                try:
+                    app = Gio.DesktopAppInfo.new_from_filename(path)
+                except (TypeError, GLib.Error):
+                    app = None
+            if app is None:
+                continue
+            key = app.get_id() or path
+            if key in pinned:
+                continue
+            pinned.insert(idx, key)
+            idx += 1
+            changed = True
+        if changed:
+            self.cfg["pinned"] = pinned
+            save_config(self.cfg)
+            self.refresh_items()
+
+    # ---------------------------------------------------------- window preview
+
+    def preview_visible(self):
+        return self.preview is not None and self.preview.get_visible()
+
+    def preview_hide(self):
+        if self._prev_id:
+            GLib.source_remove(self._prev_id)
+            self._prev_id = 0
+        self.prev_target = None
+        if self.preview_visible():
+            self.preview.hide()
+            self.area.queue_draw()
+            self.schedule_hide()
+
+    def preview_hover(self):
+        """Called on every mouse move over the dock."""
+        if (not self.cfg.get("preview") or self.dragging or self.menu_open or
+                self.press_item is not None):
+            self.preview_hide()
+            return
+        it = self.item_at(self.mx)
+        if it is not None and (it.is_sep or not it.windows):
+            it = None
+        if it is self.prev_target:
+            return
+        self.prev_target = it
+        if self._prev_id:
+            GLib.source_remove(self._prev_id)
+            self._prev_id = 0
+        if it is None:
+            if self.preview_visible():
+                self.preview.hide()
+                self.area.queue_draw()
+            return
+        delay = 1 if self.preview_visible() else 350
+        self._prev_id = GLib.timeout_add(delay, self._preview_show, it)
+
+    def preview_anchor(self, it):
+        cx = it.x + it.w / 2.0
+        vy = self.win_h - self.panel_h - int(self.S * (self.Z - 1)) - 6
+        rx, ry = self.pos_matrix().transform_point(cx, vy)
+        return self.win_x + rx, self.win_y + ry
+
+    def _preview_show(self, it):
+        self._prev_id = 0
+        if (not self.cfg.get("preview") or not self.hover or self.dragging or
+                self.menu_open or self.item_at(self.mx) is not it):
+            return False
+        wins = self.live_windows(it)
+        if not wins:
+            return False
+        try:
+            if self.preview is None:
+                self.preview = Preview(self)
+            ax, ay = self.preview_anchor(it)
+            self.preview.show_for(it, wins, ax, ay)
+        except Exception as e:
+            print("Preview error:", e, file=sys.stderr)
+            return False
+        self._prev_out = 0
+        if not self._prev_tick:
+            self._prev_tick = GLib.timeout_add(120, self._preview_tick)
+        self.area.queue_draw()
+        return False
+
+    def _preview_tick(self):
+        pv = self.preview
+        if pv is None or not pv.get_visible():
+            self._prev_tick = 0
+            return False
+        try:
+            seat = Gdk.Display.get_default().get_default_seat()
+            _s, px, py = seat.get_pointer().get_position()
+            x, y = pv.get_position()
+            w, h = pv.get_size()
+        except Exception:
+            return True
+        m = 14
+        inside = x - m <= px <= x + w + m and y - m <= py <= y + h + m
+        if inside or (self.hover and self.prev_target is not None):
+            self._prev_out = 0
+        else:
+            self._prev_out += 1
+            if self._prev_out >= 3:
+                self._prev_tick = 0
+                self.preview_hide()
+                return False
+        return True
+
+    def preview_click(self, xid, button):
+        wins = [w for w in (Wnck.Window.get(xid),) if w is not None] if self.wnck else []
+        self.preview_hide()
+        if not wins:
+            return
+        w = wins[0]
+        ts = now_ts()
+        try:
+            if button == 2:
+                w.close(ts)
+            else:
+                if w.is_minimized():
+                    w.unminimize(ts)
+                w.activate(ts)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------- actions
 
@@ -1133,6 +1402,8 @@ class Dock(Gtk.Window):
 
     def apply_settings(self):
         cfg = self.cfg
+        if not cfg.get("preview"):
+            self.preview_hide()
         self.S = int(cfg["icon_size"])
         self.Z = float(cfg["zoom"])
         self.gap = int(cfg["spacing"])
@@ -1275,6 +1546,153 @@ class Dock(Gtk.Window):
 
 
 
+# ------------------------------------------------------------ window preview
+
+class Preview(Gtk.Window):
+    """Popup next to an icon: the app's windows as cards (thumbnail + title)."""
+
+    TW = 190   # thumbnail box
+    TH = 115
+
+    def __init__(self, dock):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.dock = dock
+        self.box = None
+        self.set_decorated(False)
+        self.set_app_paintable(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_keep_above(True)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.connect("draw", self.on_draw)
+
+    def apply_css(self):
+        cfg = self.dock.cfg
+        bg = hex_rgb(cfg["bg_color"], DEFAULTS["bg_color"])
+        luma = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]
+        fg = 16 if luma > 0.6 else 255
+        css = (".nd-title { color: rgb(%d,%d,%d); font-size: 12px; } "
+               ".nd-card { background: rgba(%d,%d,%d,0.07); border-radius: 8px; } "
+               ".nd-card.hot { background: rgba(%d,%d,%d,0.22); }"
+               % ((fg,) * 9))
+        try:
+            self.css.load_from_data(css.encode())
+        except GLib.Error:
+            pass
+
+    def on_draw(self, widget, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        cfg = self.dock.cfg
+        bg = hex_rgb(cfg["bg_color"], DEFAULTS["bg_color"])
+        bd = hex_rgb(cfg["border_color"], DEFAULTS["border_color"])
+        rrect(cr, 0.5, 0.5, w - 1, h - 1, 14)
+        cr.set_source_rgba(bg[0], bg[1], bg[2], max(0.85, float(cfg["opacity"])))
+        cr.fill_preserve()
+        cr.set_source_rgba(bd[0], bd[1], bd[2], 0.35)
+        cr.set_line_width(1)
+        cr.stroke()
+        return False
+
+    def _card(self, it, win, thumb):
+        xid = win.get_xid()
+        card = Gtk.EventBox()
+        card.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK |
+                        Gdk.EventMask.BUTTON_PRESS_MASK)
+        card.get_style_context().add_class("nd-card")
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        v.set_border_width(6)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ic = it.icon(16)
+        if ic is not None:
+            head.pack_start(Gtk.Image.new_from_pixbuf(ic), False, False, 0)
+        try:
+            name = win.get_name() or it.name
+        except Exception:
+            name = it.name
+        title = Gtk.Label(label=name)
+        title.set_xalign(0)
+        title.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        title.set_width_chars(18 if thumb else 30)
+        title.set_max_width_chars(24 if thumb else 40)
+        title.get_style_context().add_class("nd-title")
+        head.pack_start(title, True, True, 0)
+        v.pack_start(head, False, False, 0)
+
+        if thumb:
+            pb = None
+            if self.dock.cfg.get("preview_thumbnails"):
+                pb = capture_window(win, self.TW, self.TH)
+            if pb is None:
+                pb = it.icon(48)
+            img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image()
+            img.set_size_request(self.TW, self.TH)
+            v.pack_start(img, False, False, 0)
+
+        card.add(v)
+        card.connect("enter-notify-event", self._hot, True)
+        card.connect("leave-notify-event", self._hot, False)
+        card.connect("button-press-event", self._press, xid)
+        return card
+
+    @staticmethod
+    def _hot(card, _ev, on):
+        ctx = card.get_style_context()
+        if on:
+            ctx.add_class("hot")
+        else:
+            ctx.remove_class("hot")
+        return False
+
+    def _press(self, _card, ev, xid):
+        self.dock.preview_click(xid, ev.button)
+        return True
+
+    def show_for(self, it, wins, ax, ay):
+        """ax, ay: screen point just beyond the icon (on the side facing the screen)."""
+        self.apply_css()
+        if self.box is not None:
+            self.remove(self.box)
+            self.box.destroy()
+        pos = self.dock.position()
+        compact = len(wins) > 4
+        horizontal = pos in ("bottom", "top") and not compact
+        box = Gtk.Box(orientation=(Gtk.Orientation.HORIZONTAL if horizontal
+                                   else Gtk.Orientation.VERTICAL), spacing=8)
+        box.set_border_width(10)
+        for win in wins:
+            box.pack_start(self._card(it, win, not compact), False, False, 0)
+        self.box = box
+        self.add(box)
+        box.show_all()
+        self.resize(1, 1)
+        req = self.get_preferred_size()[1]
+        w, h = req.width, req.height
+        if pos == "left":
+            x, y = ax, ay - h / 2.0
+        elif pos == "right":
+            x, y = ax - w, ay - h / 2.0
+        elif pos == "top":
+            x, y = ax - w / 2.0, ay
+        else:
+            x, y = ax - w / 2.0, ay - h
+        wa = self.dock.monitor_area()
+        x = min(max(wa.x + 4, x), wa.x + wa.width - w - 4)
+        y = min(max(wa.y + 4, y), wa.y + wa.height - h - 4)
+        self.move(int(x), int(y))
+        self.show()
+
+
 # ------------------------------------------------------------ settings window
 
 SETTINGS_ROWS = [
@@ -1296,6 +1714,8 @@ SETTINGS_COLORS = [
 
 SETTINGS_SWITCHES = [
     ("autohide", "Auto-hide (mouse at the screen edge reveals it)"),
+    ("preview", "Window preview on hover"),
+    ("preview_thumbnails", "Thumbnails in window preview"),
     ("reserve_space", "Windows do not go under the dock"),
     ("show_running", "Also show running apps that are not pinned"),
 ]

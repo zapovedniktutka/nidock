@@ -12,6 +12,10 @@ Meni na desni klik:
 
 ![Meni](screenshots/nidock-menu.png)
 
+Dok na levoj ivici (pozicija se bira u podešavanjima):
+
+![Levo](screenshots/nidock-left.png)
+
 Sopstveni separator:
 
 ![Separator](screenshots/nidock-separator.png)
@@ -27,6 +31,8 @@ Prozori ispod doka i iznad doka (podešavanje "Prozori ne idu ispod doka"):
 - Zakačene aplikacije (prevlačenjem menjaš redosled) i pokrenute nezakačene aplikacije
 - Sopstveni separatori: desni klik na ikonicu → Dodaj separator posle; prevlačenjem se pomeraju
 - Indikatori pokrenutih prozora; klik fokusira, minimizuje ili prebacuje između prozora
+- Prevlačenje fajlova na ikonicu otvara ih tom aplikacijom; prevlačenje `.desktop` fajla iz menija aplikacija na dok ga zakači
+- Pregled prozora: prelaskom preko aplikacije sa otvorenim prozorima vide se sličice i naslovi, klik prebacuje na prozor (srednji klik ga zatvara)
 - Meni na desni klik: otvori, novi prozor, akcije aplikacije, zatvori sve prozore, zakači/ukloni
 - Boje: izbor boje doka, ivice i indikatora i gotove teme
 - Pozicija doka: donja, leva, desna ili gornja ivica ekrana

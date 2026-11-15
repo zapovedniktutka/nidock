@@ -12,6 +12,10 @@ Right-click menu:
 
 ![Menu](screenshots/nidock-menu.png)
 
+Dock on the left edge (position is set in the settings):
+
+![Left](screenshots/nidock-left.png)
+
 Custom separator:
 
 ![Separator](screenshots/nidock-separator.png)
@@ -27,6 +31,8 @@ Windows under the dock and above the dock (setting "Windows do not go under the 
 - Pinned apps (drag to reorder) plus running apps that are not pinned
 - Custom separators: right-click an icon → Add separator after; drag to move
 - Running-window indicators; click to focus, minimize or cycle between windows
+- Drag files onto an icon to open them with that app; drag a `.desktop` file from the applications menu onto the dock to pin it
+- Window preview: hover an app with open windows to see thumbnails and titles, click one to jump to it (middle click closes it)
 - Right-click menu: open, new window, app actions, close all windows, pin/unpin
 - Colors: dock, border and indicator color pickers plus ready-made themes
 - Dock position: bottom, left, right or top edge of the screen
