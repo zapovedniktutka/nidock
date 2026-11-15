@@ -75,11 +75,28 @@ DEFAULTS = {
     "pinned": None,           # lista .desktop fajlova (None = automatski)
 }
 
+# po jedna aplikacija iz svake kategorije: prva koja postoji na sistemu
 CANDIDATES = [
-    "firefox.desktop", "google-chrome.desktop", "chromium.desktop",
-    "nemo.desktop", "org.gnome.Terminal.desktop", "mintinstall.desktop",
-    "xed.desktop", "org.gnome.Calculator.desktop", "vlc.desktop",
-    "code.desktop", "cinnamon-settings.desktop",
+    ("firefox.desktop", "firefox_firefox.desktop", "org.mozilla.firefox.desktop",
+     "google-chrome.desktop", "chromium.desktop", "chromium-browser.desktop",
+     "org.chromium.Chromium.desktop", "brave-browser.desktop"),
+    ("nemo.desktop", "org.kde.dolphin.desktop", "thunar.desktop",
+     "org.gnome.Nautilus.desktop", "caja-browser.desktop", "caja.desktop",
+     "pcmanfm.desktop"),
+    ("org.gnome.Terminal.desktop", "org.kde.konsole.desktop",
+     "xfce4-terminal.desktop", "mate-terminal.desktop", "xterm.desktop"),
+    ("mintinstall.desktop", "org.gnome.Software.desktop",
+     "org.kde.discover.desktop"),
+    ("xed.desktop", "org.kde.kate.desktop", "org.gnome.TextEditor.desktop",
+     "org.xfce.mousepad.desktop", "mousepad.desktop", "pluma.desktop",
+     "org.gnome.gedit.desktop"),
+    ("org.gnome.Calculator.desktop", "org.kde.kcalc.desktop",
+     "mate-calc.desktop", "galculator.desktop"),
+    ("cinnamon-settings.desktop", "org.kde.systemsettings.desktop",
+     "systemsettings.desktop", "xfce-settings-manager.desktop",
+     "org.gnome.Settings.desktop", "mate-control-center.desktop"),
+    ("vlc.desktop",),
+    ("code.desktop",),
 ]
 
 GAP = 8        # razmak između ikonica
@@ -240,8 +257,13 @@ def load_config():
     except (OSError, ValueError):
         pass
     if not cfg.get("pinned"):
-        cfg["pinned"] = [c for c in CANDIDATES
-                         if desktop_app(c) is not None][:8]
+        pinned = []
+        for group in CANDIDATES:
+            for c in group:
+                if desktop_app(c) is not None:
+                    pinned.append(c)
+                    break
+        cfg["pinned"] = pinned[:8]
     return cfg
 
 
