@@ -4,10 +4,28 @@ Jednostavan, lagan dok sa zum efektom za **Linux Mint (Cinnamon, X11)**, napisan
 
 🇬🇧 English version: [`nidock.py`](nidock.py) · [README.md](README.md)
 
+## Slike ekrana
+
+![NiDock](screenshots/nidock.png)
+
+Meni na desni klik:
+
+![Meni](screenshots/nidock-menu.png)
+
+Sopstveni separator:
+
+![Separator](screenshots/nidock-separator.png)
+
+Prozori ispod doka i iznad doka (podešavanje "Prozori ne idu ispod doka"):
+
+![Ispod](screenshots/nidock-under.png)
+![Iznad](screenshots/nidock-above.png)
+
 ## Mogućnosti
 
 - Zum ikonica pri prelasku mišem (kao na macOS-u), glatka animacija i skakanje pri pokretanju
 - Zakačene aplikacije (prevlačenjem menjaš redosled) i pokrenute nezakačene aplikacije
+- Sopstveni separatori: desni klik na ikonicu → Dodaj separator posle; prevlačenjem se pomeraju
 - Indikatori pokrenutih prozora; klik fokusira, minimizuje ili prebacuje između prozora
 - Meni na desni klik: otvori, novi prozor, akcije aplikacije, zatvori sve prozore, zakači/ukloni
 - Boje: izbor boje doka, ivice i indikatora i gotove teme

@@ -4,10 +4,28 @@ A simple, lightweight dock with a zoom effect for **Linux Mint (Cinnamon, X11)**
 
 🇷🇸 Serbian version: [`nidock_sr.py`](nidock_sr.py) · [README.sr.md](README.sr.md)
 
+## Screenshots
+
+![NiDock](screenshots/nidock.png)
+
+Right-click menu:
+
+![Menu](screenshots/nidock-menu.png)
+
+Custom separator:
+
+![Separator](screenshots/nidock-separator.png)
+
+Windows under the dock and above the dock (setting "Windows do not go under the dock"):
+
+![Under](screenshots/nidock-under.png)
+![Above](screenshots/nidock-above.png)
+
 ## Features
 
 - Icon zoom on hover (macOS-style), smooth animation and launch bounce
 - Pinned apps (drag to reorder) plus running apps that are not pinned
+- Custom separators: right-click an icon → Add separator after; drag to move
 - Running-window indicators; click to focus, minimize or cycle between windows
 - Right-click menu: open, new window, app actions, close all windows, pin/unpin
 - Colors: dock, border and indicator color pickers plus ready-made themes

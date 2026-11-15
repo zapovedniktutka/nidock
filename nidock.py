@@ -85,6 +85,7 @@ CANDIDATES = [
 GAP = 8        # gap between icons
 PAD = 10       # inner padding of the panel
 SEP = 16       # separator width
+SEP_KEY = "--separator--"   # marker for a user-placed separator in the pinned list
 TIP_H = 36     # space reserved for the tooltip
 
 
@@ -323,6 +324,7 @@ class Item:
         self.keys = set()
         if app:
             self.keys = strong_keys(app) | name_keys(app)
+        self.is_sep = False
         self.scale = 1.0
         self.target = 1.0
         self.bounce_t0 = None
@@ -511,6 +513,11 @@ class Dock(Gtk.Window):
         pinned_items = []
         pinned_by_id = {}
         for pid in self.cfg["pinned"]:
+            if pid == SEP_KEY:
+                sep = Item(SEP_KEY, pinned=True)
+                sep.is_sep = True
+                pinned_items.append(sep)
+                continue
             it = self.cache.get(pid)
             if it is None:
                 app = desktop_app(pid)
@@ -568,7 +575,7 @@ class Dock(Gtk.Window):
             del self.cache[k]
 
         self.items = pinned_items + order
-        self.has_sep = bool(pinned_items) and bool(order)
+        self.has_sep = any(not p.is_sep for p in pinned_items) and bool(order)
         self.sep_index = len(pinned_items)
         self.apply_geometry()
         self.update_targets()
@@ -579,8 +586,8 @@ class Dock(Gtk.Window):
 
     def apply_geometry(self, struts=True):
         S, Z = self.S, self.Z
-        n = max(1, len(self.items))
-        self.base_w = n * (S + self.gap) + (SEP if self.has_sep else 0)
+        self.base_w = (sum(SEP if it.is_sep else S + self.gap for it in self.items)
+                       or (S + self.gap)) + (SEP if self.has_sep else 0)
         self.panel_h = S + 2 * self.pad
         self.headroom = int(S * (Z - 1)) + TIP_H + int(S * 0.5)
         self.win_h = self.headroom + self.panel_h
@@ -683,22 +690,28 @@ class Dock(Gtk.Window):
 
     def base_centers(self):
         slot = self.S + self.gap
-        left = (self.win_w - self.base_w) / 2.0
+        x = (self.win_w - self.base_w) / 2.0
         res = []
-        for i in range(len(self.items)):
-            cx = left + i * slot + slot / 2.0
-            if self.has_sep and i >= self.sep_index:
-                cx += SEP
-            res.append(cx)
+        for i, it in enumerate(self.items):
+            if self.has_sep and i == self.sep_index:
+                x += SEP
+            w = SEP if it.is_sep else slot
+            res.append(x + w / 2.0)
+            x += w
         return res
 
     def layout(self):
         S = self.S
-        total = sum(S * it.scale + self.gap for it in self.items) + (SEP if self.has_sep else 0)
+        total = (sum(SEP if it.is_sep else S * it.scale + self.gap for it in self.items)
+                 + (SEP if self.has_sep else 0))
         x = (self.win_w - total) / 2.0
         for i, it in enumerate(self.items):
             if self.has_sep and i == self.sep_index:
                 x += SEP
+            if it.is_sep:
+                it.x, it.size, it.w = x, 0.0, float(SEP)
+                x += SEP
+                continue
             s = S * it.scale
             it.x = x
             it.size = s
@@ -722,6 +735,8 @@ class Dock(Gtk.Window):
         if self.hover and self.mx is not None and not self.dragging and not self.menu_open:
             R = 2.2 * (self.S + self.gap)
             for it, cx in zip(self.items, self.base_centers()):
+                if it.is_sep:
+                    continue
                 d = abs(self.mx - cx)
                 if d < R:
                     it.target = 1.0 + (self.Z - 1.0) * 0.5 * (1.0 + math.cos(math.pi * d / R))
@@ -808,6 +823,16 @@ class Dock(Gtk.Window):
         now = time.monotonic()
 
         for it in self.items:
+            if it.is_sep:
+                sx = it.x + SEP / 2.0
+                if self.dragging and it is self.press_item and self.mx is not None:
+                    sx = self.mx
+                cr.set_source_rgba(bd[0], bd[1], bd[2], 0.4)
+                cr.set_line_width(1)
+                cr.move_to(sx, py + 12)
+                cr.line_to(sx, py + self.panel_h - 12)
+                cr.stroke()
+                continue
             s = it.size
             x = it.x + self.gap / 2.0
             y = baseline - s
@@ -844,7 +869,7 @@ class Dock(Gtk.Window):
         # tooltip
         if self.hover and not self.dragging and not self.menu_open:
             it = self.item_at(self.mx)
-            if it is not None:
+            if it is not None and not it.is_sep:
                 label = it.name
                 if len(it.windows) > 1:
                     label += " (%d)" % len(it.windows)
@@ -939,7 +964,7 @@ class Dock(Gtk.Window):
             self.update_targets()
             self.kick()
             return True
-        if it is not None and it is self.item_at(ev.x):
+        if it is not None and not it.is_sep and it is self.item_at(ev.x):
             if ev.button == 1:
                 self.activate_item(it)
             elif ev.button == 2:
@@ -1073,6 +1098,24 @@ class Dock(Gtk.Window):
             self.cache.pop(it.key, None)
             self.refresh_items()
 
+    def add_separator_after(self, key):
+        keys = [x.key for x in self.items if x.pinned]
+        if key not in keys:
+            return
+        keys.insert(keys.index(key) + 1, SEP_KEY)
+        self.cfg["pinned"] = keys
+        save_config(self.cfg)
+        self.refresh_items()
+
+    def remove_separator(self, ordinal):
+        seps = [x for x in self.items if x.is_sep]
+        if ordinal >= len(seps):
+            return
+        target = seps[ordinal]
+        self.cfg["pinned"] = [x.key for x in self.items if x.pinned and x is not target]
+        save_config(self.cfg)
+        self.refresh_items()
+
     def close_windows(self, it):
         ts = now_ts()
         for w in self.live_windows(it):
@@ -1089,7 +1132,11 @@ class Dock(Gtk.Window):
             mi.connect("activate", lambda *_: cb())
             menu.append(mi)
 
-        if it is not None:
+        if it is not None and it.is_sep:
+            n = [x for x in self.items if x.is_sep].index(it)
+            add("Remove separator", lambda: self.remove_separator(n))
+            menu.append(Gtk.SeparatorMenuItem())
+        elif it is not None:
             add("Open" if not it.windows else "New window", lambda: self.launch(it))
             if it.app is not None:
                 try:
@@ -1102,6 +1149,7 @@ class Dock(Gtk.Window):
             menu.append(Gtk.SeparatorMenuItem())
             if it.pinned:
                 add("Remove from dock", lambda: self.unpin(it))
+                add("Add separator after", lambda: self.add_separator_after(it.key))
             elif it.app is not None:
                 add("Pin to dock", lambda: self.pin(it))
             menu.append(Gtk.SeparatorMenuItem())
